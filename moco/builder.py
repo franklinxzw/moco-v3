@@ -7,6 +7,21 @@
 import torch
 import torch.nn as nn
 
+def accuracy(output, target, topk=(1,)):
+    """Computes the accuracy over the k top predictions for the specified values of k"""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+
+        res = []
+        for k in topk:
+            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
 
 class MoCo(nn.Module):
     """
@@ -69,8 +84,10 @@ class MoCo(nn.Module):
         # Einstein sum is more intuitive
         logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
         N = logits.shape[0]  # batch size per GPU
-        labels = (torch.arange(N, dtype=torch.long) + N * torch.distributed.get_rank()).cuda()
-        return nn.CrossEntropyLoss()(logits, labels) * (2 * self.T)
+        #labels = (torch.arange(N, dtype=torch.long) + N * torch.distributed.get_rank()).cuda()
+        labels = (torch.arange(N, dtype=torch.long)).cuda()
+        acc1, acc5 = accuracy(logits, labels, topk=(1,5))
+        return nn.CrossEntropyLoss()(logits, labels) * (2 * self.T), acc1, acc5
 
     def forward(self, x1, x2, m):
         """
@@ -92,8 +109,10 @@ class MoCo(nn.Module):
             # compute momentum features as targets
             k1 = self.momentum_encoder(x1)
             k2 = self.momentum_encoder(x2)
-
-        return self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
+        loss_q1k2, acc1_q1k2, acc5_q1k2 = self.contrastive_loss(q1, k2)
+        loss_q2k1, acc1_q2k1, acc5_q2k1 = self.contrastive_loss(q2, k1)
+        loss = loss_q1k2 + loss_q2k1
+        return loss, acc1_q1k2, acc5_q1k2, acc1_q2k1, acc5_q2k1
 
 
 class MoCo_ResNet(MoCo):

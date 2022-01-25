@@ -29,12 +29,16 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.transforms._transforms_video as transforms_video
 
 import moco.builder
 import moco.loader
 import moco.optimizer
+from dataloader import VideoDataset, Kinetics400
 
 import vits
+
+import wandb
 
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
@@ -43,17 +47,13 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
-parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument('data', metavar='DIR',
+parser = argparse.ArgumentParser(description='MoCo Kinetics Pre-Training')
+parser.add_argument('--data', type=str,
                     help='path to dataset')
-parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
-                    choices=model_names,
-                    help='model architecture: ' +
-                        ' | '.join(model_names) +
-                        ' (default: resnet50)')
+parser.add_argument('--save_dir', type=str, default='runs')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
-parser.add_argument('--epochs', default=100, type=int, metavar='N',
+parser.add_argument('--epochs', default=50, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -62,7 +62,10 @@ parser.add_argument('-b', '--batch-size', default=4096, type=int,
                     help='mini-batch size (default: 4096), this is the total '
                          'batch size of all GPUs on all nodes when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.6, type=float,
+parser.add_argument('--input-res', default=224, type=int)
+parser.add_argument('--clip-len', default=16, type=int)
+parser.add_argument('--stride', default=1, type=int)
+parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                     metavar='LR', help='initial (base) learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -90,6 +93,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'N processes per node, which has N GPUs. This is the '
                          'fastest way to use PyTorch for either single node or '
                          'multi node data parallel training')
+parser.add_argument('--log-freq', default=10, type=int)
+parser.add_argument('--save-freq', default=5, type=int)
 
 # moco specific configs:
 parser.add_argument('--moco-dim', default=256, type=int,
@@ -112,10 +117,15 @@ parser.add_argument('--stop-grad-conv1', action='store_true',
 parser.add_argument('--optimizer', default='lars', type=str,
                     choices=['lars', 'adamw'],
                     help='optimizer used (default: lars)')
-parser.add_argument('--warmup-epochs', default=10, type=int, metavar='N',
+parser.add_argument('--warmup-epochs', default=5, type=int, metavar='N',
                     help='number of warmup epochs')
-parser.add_argument('--crop-min', default=0.08, type=float,
+parser.add_argument('--crop-min', default=0.2, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
+
+# wandb
+parser.add_argument('--wandb-api-key', type=str)
+parser.add_argument('--wandb-project-name', type=str)
+parser.add_argument('--run-name', type=str)
 
 
 def main():
@@ -140,7 +150,7 @@ def main():
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
 
-    ngpus_per_node = 3#torch.cuda.device_count()
+    ngpus_per_node = 2#torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -176,15 +186,11 @@ def main_worker(gpu, ngpus_per_node, args):
                                 world_size=args.world_size, rank=args.rank)
         torch.distributed.barrier()
     # create model
-    print("=> creating model '{}'".format(args.arch))
-    if args.arch.startswith('vit'):
-        model = moco.builder.MoCo_ViT(
-            partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1),
-            args.moco_dim, args.moco_mlp_dim, args.moco_t)
-    else:
-        model = moco.builder.MoCo_ResNet(
-            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
-            args.moco_dim, args.moco_mlp_dim, args.moco_t)
+    print("=> creating model")
+    #print(torchvision_models.video.r3d_18())
+    model = moco.builder.MoCo_ResNet(
+        partial(torchvision_models.video.r3d_18, zero_init_residual=True), 
+        args.moco_dim, args.moco_mlp_dim, args.moco_t)
 
     # infer learning rate before changing batch size
     args.lr = args.lr * args.batch_size / 256
@@ -215,12 +221,11 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+        #raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
     print(model) # print model after SyncBatchNorm
-
     if args.optimizer == 'lars':
         optimizer = moco.optimizer.LARS(model.parameters(), args.lr,
                                         weight_decay=args.weight_decay,
@@ -230,7 +235,11 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
         
     scaler = torch.cuda.amp.GradScaler()
-    summary_writer = SummaryWriter() if args.rank == 0 else None
+    run_dir = os.path.join(args.save_dir, args.run_name)
+    summary_writer_logdir = os.path.join(run_dir, 'tensorboard_moco')
+    summary_writer = SummaryWriter(log_dir=summary_writer_logdir) if args.rank == 0 else None
+    if not args.distributed:
+        summary_writer = SummaryWriter(log_dir=summary_writer_logdir)
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -254,40 +263,19 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-
-    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
-    augmentation1 = [
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
-    augmentation2 = [
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),
-        transforms.RandomApply([moco.loader.Solarize()], p=0.2),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
-
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                      transforms.Compose(augmentation2)))
+    
+    normalize_video = transforms_video.NormalizeVideo(mean=[0.485, 0.456, 0.406],
+                                                      std=[0.229, 0.224, 0.225])
+    video_augmentation = transforms.Compose(
+        [
+            transforms_video.ToTensorVideo(),
+            transforms_video.RandomResizedCropVideo(args.input_res, (args.crop_min, 1)),
+            normalize_video
+        ]
+    )
+    #train_dataset = VideoFlowDataset(contrastive=True, train=True, transform=video_augmentation)
+    train_dataset = VideoDataset(video_folder= args.data, contrastive=True, train=True, transform=video_augmentation,  stride=args.stride, clip_len=args.clip_len)
+    #train_sampler = RandomClipSampler(train_dataset.video_clips, 1)
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -297,26 +285,45 @@ def main_worker(gpu, ngpus_per_node, args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-
+    
+    if args.rank == 0:
+        #wandb.init(project="rgb_flow_representations", entity="franklin_wang", name=args.)
+        wandb.login(key=args.wandb_api_key)
+        wandb.init(project=args.wandb_project_name, entity="franklin_wang", name=(args.run_name))
+        wandb.config = {
+          "learning_rate": args.lr,
+          "epochs": args.epochs,
+          "batch_size": args.batch_size,
+          "optimizer" : args.optimizer, 
+          "moco_dim" : args.moco_dim,
+          "moco_mlp_dim" : args.moco_mlp_dim  
+        }
+        wandb.watch(model)
+        os.makedirs(args.save_dir, exist_ok=True)
+        os.makedirs(run_dir, exist_ok=True)
+    
     for epoch in range(args.start_epoch, args.epochs):
+        #print("Epoch ", epoch)
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
         train(train_loader, model, optimizer, scaler, summary_writer, epoch, args)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank == 0): # only the first GPU saves checkpoint
+        if (not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                and args.rank == 0)) and (((epoch + 1) % args.save_freq) == 0): # only the first GPU saves checkpoint
             save_checkpoint({
                 'epoch': epoch + 1,
-                'arch': args.arch,
+                'arch': '3d_resnet18',
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
                 'scaler': scaler.state_dict(),
-            }, is_best=False, filename='checkpoint_%04d.pth.tar' % epoch)
+            }, is_best=False, filename=os.path.join(run_dir, 'checkpoint_%04d.pth.tar' % epoch))
 
     if args.rank == 0:
+        print("Training finished")
         summary_writer.close()
+        wandb.finish()
 
 def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -335,9 +342,9 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     iters_per_epoch = len(train_loader)
     moco_m = args.moco_m
     for i, (images, _) in enumerate(train_loader):
+        #print("Iteration start: ", i)
         # measure data loading time
         data_time.update(time.time() - end)
-
         # adjust learning rate and momentum coefficient per iteration
         lr = adjust_learning_rate(optimizer, epoch + i / iters_per_epoch, args)
         learning_rates.update(lr)
@@ -353,18 +360,20 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             loss, acc1_q1k2, acc5_q1k2, acc1_q2k1, acc5_q2k1 = model(images[0], images[1], moco_m)
 
         losses.update(loss.item(), images[0].size(0))
-        if args.rank == 0:
+        if args.rank == 0 and ((i % args.log_freq) == 0):
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
             summary_writer.add_scalar("acc1_q1", acc1_q1k2.item(), epoch * iters_per_epoch + i)
             summary_writer.add_scalar("acc5_q1", acc5_q1k2.item(), epoch * iters_per_epoch + i)
             summary_writer.add_scalar("acc1_q2", acc1_q2k1.item(), epoch * iters_per_epoch + i)
             summary_writer.add_scalar("acc5_q2", acc5_q2k1.item(), epoch * iters_per_epoch + i)
+            wandb.log({"loss": loss.item(), "acc1_q1" : acc1_q1k2.item(), "acc5_q1": acc5_q1k2.item(), "acc1_q2" : acc1_q2k1.item(), "acc5_q2": acc5_q2k1.item()}, step = epoch * iters_per_epoch + i)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        #print("Iteration end: ", i)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
