@@ -180,7 +180,7 @@ def main_worker(gpu, ngpus_per_node, args):
                                 world_size=args.world_size, rank=args.rank)
         torch.distributed.barrier()
     # create model
-    print("=> creating model '{}'".format(args.arch))
+    #print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('vit'):
         #model = vits.__dict__[args.arch]()
         linear_keyword = 'head'
@@ -333,7 +333,7 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True)
         
     run_dir = os.path.join(args.save_dir, args.run_name)
-    summary_writer_logdir = os.path.join(run_dir, 'tensorboard_lincls_' + str(pretrained_epoch))
+    summary_writer_logdir = os.path.join(run_dir, 'tensorboard_lincls_' + os.path.basename(args.pretrained))
     summary_writer = SummaryWriter(log_dir=summary_writer_logdir) if args.rank == 0 else None
     if not args.distributed:
         summary_writer = SummaryWriter(log_dir=summary_writer_logdir)
@@ -363,11 +363,9 @@ def main_worker(gpu, ngpus_per_node, args):
         adjust_learning_rate(optimizer, init_lr, epoch, args)
 
         # train for one epoch
-        print("Training")
         train(train_loader, model, criterion, optimizer, summary_writer, epoch, args)
 
         # evaluate on validation set
-        print("Validating")
         acc1, acc5 = validate(val_loader, model, criterion, summary_writer, epoch, args)
 
         # remember best acc@1 and save checkpoint
@@ -387,7 +385,6 @@ def main_worker(gpu, ngpus_per_node, args):
             if epoch == args.start_epoch:
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
     if args.rank == 0:
-        print("Training finished")
         summary_writer.close()
         wandb.finish()
 
