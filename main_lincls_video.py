@@ -32,7 +32,7 @@ from dataloader import VideoDataset
 import torchvision.transforms._transforms_video as transforms_video
 from transforms_video import ShortSideScale
 
-import vits
+#import vits
 import wandb
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__

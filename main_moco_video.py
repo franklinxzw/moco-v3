@@ -36,8 +36,6 @@ import moco.loader
 import moco.optimizer
 from dataloader import VideoDataset, Kinetics400
 
-import vits
-
 import wandb
 
 
