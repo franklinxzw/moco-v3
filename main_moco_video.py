@@ -48,7 +48,7 @@ model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + tor
 parser = argparse.ArgumentParser(description='MoCo Kinetics Pre-Training')
 parser.add_argument('--data', type=str,
                     help='path to dataset')
-parser.add_argument('--save_dir', type=str, default='runs')
+parser.add_argument('--save-dir', type=str, default='runs')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=50, type=int, metavar='N',

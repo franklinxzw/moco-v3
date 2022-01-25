@@ -55,7 +55,7 @@ parser.add_argument('--pretrained', default='', type=str,
                     help='path to moco pretrained checkpoint')
 parser.add_argument('--data', type=str,
                     help='path to dataset')
-parser.add_argument('--save_dir', type=str, default='runs')
+parser.add_argument('--save-dir', type=str, default='runs')
 parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
                     help='number of data loading workers (default: 32)')
 parser.add_argument('--epochs', default=50, type=int, metavar='N',
