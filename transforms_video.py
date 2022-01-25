@@ -1,4 +1,5 @@
 import torch
+import math
 
 def short_side_scale(
     x: torch.Tensor,
@@ -49,4 +50,4 @@ class ShortSideScale(object):
         self._size = size
 
     def __call__(self, sample):
-        return short_side_scale(x, self._size)
+        return short_side_scale(sample, self._size)

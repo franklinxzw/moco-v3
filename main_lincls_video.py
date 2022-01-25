@@ -309,7 +309,7 @@ def main_worker(gpu, ngpus_per_node, args):
             transforms_video.ToTensorVideo(),
             ShortSideScale(args.input_res),
             transforms_video.CenterCropVideo(args.input_res),
-            normalize_video,
+            normalize_video
         ]
     )
     
@@ -333,7 +333,7 @@ def main_worker(gpu, ngpus_per_node, args):
         num_workers=args.workers, pin_memory=True)
         
     run_dir = os.path.join(args.save_dir, args.run_name)
-    summary_writer_logdir = os.path.join(run_dir, 'tensorboard_lincls')
+    summary_writer_logdir = os.path.join(run_dir, 'tensorboard_lincls_' + str(pretrained_epoch))
     summary_writer = SummaryWriter(log_dir=summary_writer_logdir) if args.rank == 0 else None
     if not args.distributed:
         summary_writer = SummaryWriter(log_dir=summary_writer_logdir)
@@ -353,7 +353,8 @@ def main_worker(gpu, ngpus_per_node, args):
         os.makedirs(run_dir, exist_ok=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion, 0, args)
+        #validate(val_loader, model, criterion, 0, args)
+        acc1, acc5 = validate(val_loader, model, criterion, summary_writer, 0, args)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -382,7 +383,6 @@ def main_worker(gpu, ngpus_per_node, args):
                 'acc5' : acc5,
                 'state_dict': model.state_dict(),
                 'optimizer' : optimizer.state_dict(),
-                'scaler': scaler.state_dict(),
             }, is_best=False, filename=os.path.join(run_dir, 'eval_checkpoint_%04d.pth.tar' % epoch))
             if epoch == args.start_epoch:
                 sanity_check(model.state_dict(), args.pretrained, linear_keyword)
@@ -492,10 +492,11 @@ def validate(val_loader, model, criterion, summary_writer, epoch, args):
         # TODO: this should also be done with the ProgressMeter
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
-    summary_writer.add_scalar("val_loss", losses.avg, epoch)
-    summary_writer.add_scalar("val_acc1", top1.avg, epoch)
-    summary_writer.add_scalar("val_acc5", top5.avg, epoch)
-    wandb.log({"val_loss": losses.avg, "val_acc1" : top1.avg, "val_acc5": top5.avg}, epoch)
+    if args.rank == 0:
+        summary_writer.add_scalar("val_loss", losses.avg, epoch)
+        summary_writer.add_scalar("val_acc1", top1.avg, epoch)
+        summary_writer.add_scalar("val_acc5", top5.avg, epoch)
+        wandb.log({"val_loss": losses.avg, "val_acc1" : top1.avg, "val_acc5": top5.avg})
     return top1.avg, top5.avg
 
 
